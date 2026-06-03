@@ -2,382 +2,345 @@ import streamlit as st
 import pandas as pd
 import os
 import random
-import calendar
 from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
-from PIL import Image
+from supabase import create_client, Client
 
-# 1. 网页基础配置
-st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout="wide")
-
-st.title("🧠 Gemini 考研独享舱 (日历可视化最终完全体)")
+# ==========================================
+# 1. 网页基础配置与云端安全环境设定
+# ==========================================
+st.set_page_config(page_title="TabMistake - 考研全效工作台", layout="wide")
+st.title("🧠 TabMistake 考研独享舱 (云端全能版)")
 st.markdown("---")
 
-# 2. 🔑 密钥配置区（已完美切回隐藏保险箱，100% 保护你的隐私安全）
-GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
+# 🔑 从 Streamlit Cloud 的 Secrets 中安全读取密钥
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
-# 🛠️ 网络头装甲：强行注入自定义头，彻底破除 SDK 对非 AIzaSy 开头新密钥误判为 Bearer 令牌的底层 Bug
-CORE_HTTP_OPTIONS = {
-    "headers": {
-        "x-goog-api-key": GEMINI_FREE_API_KEY,
-        "Authorization": ""  # 极其关键：强行抹除并清空被 SDK 误注入的 Bearer 认证头，解开 401 死锁
-    }
-}
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    st.error("⚠️ 未检测到 Gemini API Key，请在云端 Secrets 中配置！")
 
-# 3. 数据库与目录初始化
-MEDIA_DIR = "uploaded_media"
-DB_ERRORS = "gemini_ebbinghaus_db.xlsx"
-if not os.path.exists(MEDIA_DIR): os.makedirs(MEDIA_DIR)
+# ==========================================
+# 2. 云端数据库连接 (Supabase)
+# ==========================================
+@st.cache_resource
+def init_supabase() -> Client:
+    if SUPABASE_URL and SUPABASE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return None
+
+supabase = init_supabase()
 
 def load_data():
-    if os.path.exists(DB_ERRORS):
-        try: 
-            df = pd.read_excel(DB_ERRORS)
-            if "录入日期" not in df.columns:
-                df["录入日期"] = datetime.today().date()
-            return df
+    """从云端 Supabase 读取全量数据，融合错题与题库"""
+    if supabase:
+        try:
+            response = supabase.table("errors_table").select("*").execute()
+            if response.data:
+                df = pd.DataFrame(response.data)
+                df["NextReview"] = pd.to_datetime(df["NextReview"]).dt.date
+                df["录入日期"] = pd.to_datetime(df["录入日期"]).dt.date
+                # 兼容旧数据，如果没有"来源"列，默认全部标记为错题
+                if "来源" not in df.columns:
+                    df["来源"] = "错题"
+                return df
         except Exception as e:
-            st.error(f"⚠️ 数据库读取流发生异常: {e}")
-    return pd.DataFrame(columns=["题目ID", "科目", "考点标签", "题目内容", "错误次数", "附件路径", "NextReview", "StageInterval", "录入日期"])
+            st.error(f"⚠️ 云端数据库读取异常: {e}")
+            
+    # 保底空表结构，新增【来源】字段
+    return pd.DataFrame(columns=["题目ID", "科目", "章节", "考点标签", "题目内容", "错误次数", "附件路径", "NextReview", "StageInterval", "录入日期", "来源"])
 
 df_errors = load_data()
 
-if not df_errors.empty:
-    df_errors["NextReview"] = pd.to_datetime(df_errors["NextReview"]).dt.date
-    df_errors["录入日期"] = pd.to_datetime(df_errors["录入日期"]).dt.date
+base_subjects = ["考研数学二", "考研英语", "控制工程/汽车原理", "专业课"]
+existing_subjects = sorted(list(set(base_subjects + (df_errors["科目"].dropna().tolist() if not df_errors.empty else []))))
 
-# 4. 从数据库里动态提取所有已有科目
-if not df_errors.empty and "科目" in df_errors.columns:
-    existing_subjects = sorted(list(df_errors["科目"].dropna().unique().tolist()))
-else:
-    existing_subjects = []
-
-# 初始化平板级暂存沙盒（防止重载掉队）
+# ==========================================
+# 3. 平板级沙盒状态机初始化
+# ==========================================
+if "sandbox_chapter" not in st.session_state: st.session_state.sandbox_chapter = ""
 if "sandbox_tag" not in st.session_state: st.session_state.sandbox_tag = ""
 if "sandbox_content" not in st.session_state: st.session_state.sandbox_content = ""
 if "last_processed_file" not in st.session_state: st.session_state.last_processed_file = None
-if "selected_calendar_day" not in st.session_state: st.session_state.selected_calendar_day = None
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [{"role": "assistant", "content": "你好！我是你的考研全科 AI 助教。左侧题目扫描成功后，我已实时同步进我的大脑。请随时向我提问，我将用最严密的逻辑为你进行全步骤公式推导排版！"}]
+    st.session_state.chat_history = [{"role": "assistant", "content": "你好！我是你的专属考研 AI 助教。请随时向我提问，我将用最严谨的逻辑为你进行推导！"}]
+if "current_focus_content" not in st.session_state: st.session_state.current_focus_content = ""
+if "current_focus_tag" not in st.session_state: st.session_state.current_focus_tag = ""
 
-# 💡 辅助函数：绘制真正支持高亮和交互的可视化日历
-def render_interactive_calendar(df, subject):
-    st.markdown(f"##### 📅 【{subject}】艾宾浩斯复习热力月历")
-    today = datetime.today()
-    year, month = today.year, today.month
-    
-    # 提取本月该科目所有有复习任务的日期
-    subject_df = df[df["科目"] == subject] if not df.empty else pd.DataFrame()
-    task_days = []
-    if not subject_df.empty:
-        task_days = subject_df["NextReview"].apply(lambda x: x.day if x.month == month and x.year == year else 0).tolist()
-        task_days = [d for d in task_days if d != 0]
+# ==========================================
+# 4. 页面大布局：左右分栏
+# ==========================================
+col_left, col_right = st.columns([1.2, 1])
 
-    cal = calendar.monthcalendar(year, month)
-    
-    # 绘制星期头
-    cols_head = st.columns(7)
-    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-    for i, col in enumerate(cols_head):
-        col.markdown(f"<center>**{weekdays[i]}**</center>", unsafe_allowed_html=True)
-        
-    # 循环绘制日期网格按钮
-    for week in cal:
-        cols_day = st.columns(7)
-        for i, day in enumerate(week):
-            if day == 0:
-                cols_day[i].write("")
-            else:
-                has_task = day in task_days
-                # 如果当天有复习任务，名字后面挂个火苗 🔥
-                btn_label = f"{day} 🔥" if has_task else f"{day}"
-                
-                # 平板点击按钮，直接锁定当天日期数据
-                if cols_day[i].button(btn_label, key=f"btn_cal_{day}_{random.randint(1000,9999)}", use_container_width=True):
-                    st.session_state.selected_calendar_day = datetime(year, month, day).date()
-
-# 5. 页面大布局：左右分栏
-col_left, col_right = st.columns([3, 2])
-
-# ==================== 左侧：全动态科目管理与错题流 ====================
+# ------------------------------------------
+# 左侧：全动态科目管理、抽题与题库流
+# ------------------------------------------
 with col_left:
-    selected_subject = None
+    selected_subject = st.segmented_control("🏷️ **当前攻坚科目：**", options=existing_subjects, default=existing_subjects[0])
     
-    if existing_subjects:
-        selected_subject = st.segmented_control("🏷️ **当前正在复习的科目：**", options=existing_subjects, default=existing_subjects[0])
-    else:
-        st.info("💡 你的智能错题本目前还是空的哦！请在下方上传第一道错题快照开始吧！")
+    upload_tab1, upload_tab2, review_tab3, daily_quiz_tab4 = st.tabs(["📸 错题精准录入", "📥 专属题库导入", "📚 历史错题本", "🎯 每日混合抽题"])
     
-    upload_tab1, upload_tab2 = st.tabs(["📸 单题 AI 自由智能录入", "⚡ 多文件闪电批量导入"])
-    
-    # --- 通道 1：单题自由录入流 ---
+    # --- 通道 1：单题 AI 智能归档 (错题端) ---
     with upload_tab1:
-        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板大屏强烈推荐使用相册分屏拖拽或直拍）")
-        
-        upload_mode = st.radio("选择传图媒介：", ["📸 使用平板摄像头直接对着屏幕/试卷拍照", "📁 从系统相册/本地文件选取"], horizontal=True)
-        
-        uploaded_file = None
-        if upload_mode == "📁 从系统相册/本地文件选取":
-            uploaded_file = st.file_uploader("点击上传错题图片（支持相册直接拖拽入内）", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
-        else:
-            uploaded_file = st.camera_input("请将平板镜头对准错题或电脑屏幕上的讲义")
+        st.markdown("##### 1️⃣ 截屏/拍照直传 (标记为错题)")
+        uploaded_file = st.file_uploader("点击或拖拽错题图片（支持平板直接操作）", type=["png", "jpg", "jpeg", "pdf"], key="single_uploader")
         
         if uploaded_file is not None:
-            file_name = getattr(uploaded_file, "name", f"camera_{random.randint(100,999)}.jpg")
+            file_name = getattr(uploaded_file, "name", f"doc_{random.randint(1000,9999)}.pdf")
+            file_ext = file_name.lower().split('.')[-1]
             
-            st.image(uploaded_file, caption="👀 错题原件已成功读入平板内存，就绪！", use_container_width=True)
+            if file_ext == "pdf":
+                st.success(f"📄 PDF 错题文档 [{file_name}] 已成功读入内存！")
+                mime_type = "application/pdf"
+            else:
+                st.image(uploaded_file, caption="👀 图像已读入内存，就绪！", use_container_width=True)
+                mime_type = f"image/{file_ext}" if file_ext in ['png', 'jpg', 'jpeg'] else 'image/jpeg'
             
             if st.session_state.last_processed_file != file_name:
+                st.session_state.sandbox_chapter = ""
                 st.session_state.sandbox_tag = ""
                 st.session_state.sandbox_content = ""
                 st.session_state.last_processed_file = file_name
             
-            st.markdown("##### 2️⃣ 第二步：提炼错题详情")
-            if st.button("🤖 召唤 Gemini 视觉引擎帮我全自动审题抠字", type="secondary"):
-                with st.spinner("🔮 Gemini 正在深度分析快照，自动提炼考点及 LaTeX 公式..."):
+            if st.button("🤖 召唤 Gemini 提取错题考点", type="secondary"):
+                with st.spinner("🔮 正在深度解析文档中的数学公式与知识树..."):
                     try:
-                        client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
                         prompt = (
-                            "你是一个极其专业的考研错题智能分析专家。请仔细阅读我上传的错题图片。\n"
-                            "请严格按照以下格式输出你的分析结果，不要带有任何多余的客套话或解释文本：\n"
-                            "考点: [请根据题目内容，精准提炼出1-2个核心薄弱考点标签，如：矩阵的特征值、拉格朗日中值定理、定积分等]\n"
-                            "题目内容: [请利用 Markdown 和 LaTeX 语法，把图片里的题目文本、数字、数学公式极其严密完整地抠出来并排版]"
+                            "你是一个极其专业的考研辅导专家。请阅读文件中的题目内容。\n"
+                            "严格按以下 JSON 格式输出，不要包含 ```json 等标记符：\n"
+                            "{\n"
+                            '  "章节": "提取所属的大章节，如：一元函数积分学",\n'
+                            '  "考点": "提取核心考点，如：换元积分法",\n'
+                            '  "内容": "完整提取题目文本，所有数学公式必须使用标准 LaTeX (行内用 $, 行间用 $$)"\n'
+                            "}"
                         )
-                        
-                        mime_type = "application/pdf" if file_name.lower().endswith(".pdf") else "image/jpeg"
                         doc_part = types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=mime_type)
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
-                        ai_res = response.text
+                        res = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
                         
-                        if "考点:" in ai_res:
-                            try:
-                                parts = ai_res.split("考点:")
-                                after_tag = parts[1]
-                                if "题目内容:" in after_tag:
-                                    st.session_state.sandbox_tag = after_tag.split("题目内容:")[0].strip().replace("[", "").replace("]", "")
-                                    st.session_state.sandbox_content = after_tag.split("题目内容:")[1].strip()
-                                else:
-                                    st.session_state.sandbox_tag = after_tag.split("\n")[0].strip().replace("[", "").replace("]", "")
-                                    st.session_state.sandbox_content = ai_res
-                            except:
-                                st.session_state.sandbox_content = ai_res
+                        import json, re
+                        json_str = re.search(r'\{.*\}', res.text.replace('\n', ''), re.DOTALL)
+                        if json_str:
+                            data = json.loads(json_str.group())
+                            st.session_state.sandbox_chapter = data.get("章节", "")
+                            st.session_state.sandbox_tag = data.get("考点", "")
+                            st.session_state.sandbox_content = data.get("内容", "")
+                            st.success("🎉 提取成功！请在下方核对。")
                         else:
-                            st.session_state.sandbox_content = ai_res
-                        st.success("🎉 Gemini 扫描提取成功！你可以在下方直接修改它们。")
+                            st.session_state.sandbox_content = res.text
                     except Exception as e:
-                        st.error(f"❌ Gemini 引擎分析失败: {e}")
+                        st.error(f"❌ 识别失败: {e}")
             
             st.markdown("---")
-            base_subjects = ["高等数学", "线性代数", "考研英语", "专业课"]
-            combined_subs = sorted(list(set(base_subjects + existing_subjects)))
+            st.markdown("##### 2️⃣ 确认归档标签")
+            sub_choice = st.selectbox("🎯 确认科目:", options=existing_subjects, index=existing_subjects.index(selected_subject) if selected_subject in existing_subjects else 0)
             
-            sub_choice = st.selectbox("🎯 选择已有科目标签（或在下方手写新科目）:", options=["-- ✍️ 自定义手写新科目 --"] + combined_subs)
+            c1, c2 = st.columns(2)
+            chapter_final = c1.text_input("📚 章节归属:", value=st.session_state.sandbox_chapter)
+            tag_final = c2.text_input("🎯 核心考点:", value=st.session_state.sandbox_tag)
+            content_final = st.text_area("📝 题目公式文本:", value=st.session_state.sandbox_content, height=150)
             
-            if sub_choice == "-- ✍️ 自定义手写新科目 --":
-                sub_final = st.text_input("📝 请在此手动输入你的新科目名称（例如：高等数学二、英语一）：", value="")
-            else:
-                sub_final = sub_choice
-                
-            tag_final = st.text_input("🎯 考点标签确认（支持手写微调）:", value=st.session_state.sandbox_tag)
-            content_final = st.text_area("📝 题目文本与公式描述（支持手写微调）:", value=st.session_state.sandbox_content, height=150)
-            
-            if st.button("💾 确认此错题完美归档入库", type="primary"):
-                if not sub_final.strip():
-                    st.error("❌ 归档失败：科目名称不能为空，请输入或选择一个科目！")
+            if st.button("💾 作为【错题】归档至云端", type="primary"):
+                if not tag_final.strip():
+                    st.error("❌ 考点标签不能为空！")
                 else:
                     try:
-                        f_path = os.path.join(MEDIA_DIR, file_name)
-                        with open(f_path, "wb") as f: f.write(uploaded_file.getvalue())
-                        
+                        dummy_img_url = f"cloud_storage_placeholder/{file_name}" 
                         new_row = {
-                            "题目ID": f"GEM_{random.randint(100,999)}", "科目": sub_final.strip(),
-                            "考点标签": tag_final.strip() if tag_final.strip() else "基础归纳", 
-                            "题目内容": content_final.strip() if content_final.strip() else "图片题目", 
-                            "错误次数": 1, "附件路径": f_path, "NextReview": datetime.today().date(), "StageInterval": 1,
-                            "录入日期": datetime.today().date()
+                            "题目ID": f"GEM_{random.randint(10000,99999)}", 
+                            "科目": sub_choice,
+                            "章节": chapter_final.strip(),
+                            "考点标签": tag_final.strip(), 
+                            "题目内容": content_final.strip(), 
+                            "错误次数": 1, 
+                            "附件路径": dummy_img_url, 
+                            "NextReview": str(datetime.today().date()), 
+                            "StageInterval": 1,
+                            "录入日期": str(datetime.today().date()),
+                            "来源": "错题"  # 核心改动：打上错题烙印
                         }
-                        df_errors = pd.concat([df_errors, pd.DataFrame([new_row])], ignore_index=True)
-                        df_errors.to_excel(DB_ERRORS, index=False)
-                        
-                        st.session_state.sandbox_tag = ""
-                        st.session_state.sandbox_content = ""
-                        st.toast("🎉 错题原图与分析结果已完美合流进艾宾浩斯记忆库！", icon="✅")
-                        st.rerun()
+                        if supabase:
+                            supabase.table("errors_table").insert(new_row).execute()
+                            st.toast("🎉 错题已安全入库，开启记忆循环！", icon="✅")
+                            st.rerun()
                     except Exception as e:
-                        st.error(f"❌ 数据写入硬盘失败: {e}")
+                        st.error(f"❌ 数据库写入失败: {e}")
 
-    # --- 通道 2：批量闪电导入 ---
+    # --- 通道 2：大容量专属题库导入流 ---
     with upload_tab2:
-        st.markdown("### ⚡ 多文件闪电批量导入")
-        with st.form("bulk_data_armored_form"):
-            bulk_files = st.file_uploader("选取多份错题文件", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True, key="bulk_uploader")
-            bulk_sub_default = st.text_input("为这批文件设定目标【科目Label】", value="线性代数")
-            submit_bulk = st.form_submit_button("🚀 启动流水线批量合流", type="primary")
+        st.markdown("### 📥 海量题库/试卷 PDF 导入")
+        st.info("💡 **防截断策略**：由于 200MB 的题库过于庞大，大模型单次无法吐出所有题目。请设定每次解析的【题目数量】，系统将进行智能切割。")
+        
+        with st.form("bulk_data_form"):
+            bulk_files = st.file_uploader("选取题库PDF或多份试卷截图", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True, key="bulk_uploader")
+            bulk_sub_default = st.selectbox("为这批题库设定目标【科目】", options=existing_subjects, index=0)
+            
+            parse_limit = st.slider("⚖️ 单次请求提取的题目上限 (防止大模型 JSON 断流崩溃)", min_value=1, max_value=20, value=5)
+            submit_bulk = st.form_submit_button("🚀 作为【题库】批量入云", type="primary")
             
         if submit_bulk:
             if not bulk_files:
-                st.error("❌ 批量入库失败：你还没有选中任何图片文件！")
+                st.error("❌ 导入失败：你还没有选中任何文件！")
             else:
                 progress_bar = st.progress(0)
                 success_count = 0
-                client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
                 
                 for idx, file_obj in enumerate(bulk_files):
                     try:
-                        f_path = os.path.join(MEDIA_DIR, file_obj.name)
-                        with open(f_path, "wb") as f: f.write(file_obj.getvalue())
+                        file_ext = file_obj.name.lower().split('.')[-1]
+                        mime_type = "application/pdf" if file_ext == "pdf" else (f"image/{file_ext}" if file_ext in ['png', 'jpg', 'jpeg'] else 'image/jpeg')
                         
                         prompt = (
-                            "请帮我把这个文件里的题目文本、 LaTex格式的公式完整抠出来并排版好。\n"
-                            "请严格按照以下格式输出：\n"
-                            "考点: [请提取1个核心考点标签]\n"
-                            "题目内容: [请把题目文字及公式完整提取出来]"
+                            f"你是一个题库解析引擎。请从该文件中提取最多 {parse_limit} 道题目。\n"
+                            "为了建立题库联动，必须严格按以下 JSON 数组格式输出：\n"
+                            "[\n"
+                            '  {"考点": "提炼1个核心考点", "内容": "题目完整文本及LaTeX公式"},\n'
+                            '  {"考点": "提炼另1个核心考点", "内容": "下一道题的文本"}\n'
+                            "]"
                         )
-                        mime_type = "application/pdf" if file_obj.name.lower().endswith(".pdf") else "image/jpeg"
                         doc_part = types.Part.from_bytes(data=file_obj.getvalue(), mime_type=mime_type)
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
-                        ai_res = response.text
+                        res = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
                         
-                        parsed_tag = "批量合流"
-                        parsed_content = ai_res
-                        if "考点:" in ai_res:
+                        import json, re
+                        # 尝试捕获返回的 JSON 数组
+                        json_str = re.search(r'\[.*\]', res.text.replace('\n', ''), re.DOTALL)
+                        parsed_items = []
+                        
+                        if json_str:
                             try:
-                                parts = ai_res.split("考点:")
-                                after_tag = parts[1]
-                                if "题目内容:" in after_tag:
-                                    parsed_tag = after_tag.split("题目内容:")[0].strip().replace("[", "").replace("]", "")
-                                    parsed_content = after_tag.split("题目内容:")[1].strip()
-                                else:
-                                    parsed_tag = after_tag.split("\n")[0].strip().replace("[", "").replace("]", "")
-                            except: pass
-                        
-                        new_bulk_row = {
-                            "题目ID": f"BLK_{random.randint(1000,9999)}", "科目": bulk_sub_default.strip(),
-                            "考点标签": parsed_tag, "题目内容": parsed_content, 
-                            "错误次数": 1, "附件路径": f_path, "NextReview": datetime.today().date(), "StageInterval": 1,
-                            "录入日期": datetime.today().date()
-                        }
-                        df_errors = pd.concat([df_errors, pd.DataFrame([new_bulk_row])], ignore_index=True)
-                        success_count += 1
+                                parsed_items = json.loads(json_str.group())
+                            except:
+                                parsed_items = [{"考点": "题库批量解析异常", "内容": res.text}]
+                        else:
+                            parsed_items = [{"考点": "题库批量提取", "内容": res.text}]
+                            
+                        # 循环将多道题写入数据库
+                        for item in parsed_items:
+                            tag = item.get("考点", "未分类题库")
+                            content = item.get("内容", "内容提取失败")
+                            
+                            dummy_img_url = f"cloud_storage_placeholder/{file_obj.name}" 
+                            new_bulk_row = {
+                                "题目ID": f"BANK_{random.randint(100000,999999)}", 
+                                "科目": bulk_sub_default,
+                                "章节": "题库导入",
+                                "考点标签": tag, 
+                                "题目内容": content, 
+                                "错误次数": 0,  # 题库新题，错误次数默认为0
+                                "附件路径": dummy_img_url, 
+                                "NextReview": "2099-12-31", # 题库新题不进入强制艾宾浩斯，直到它被抽中并做错
+                                "StageInterval": 0,
+                                "录入日期": str(datetime.today().date()),
+                                "来源": "题库" # 核心改动：打上题库烙印
+                            }
+                            
+                            if supabase:
+                                supabase.table("errors_table").insert(new_bulk_row).execute()
+                                success_count += 1
+                            
                     except Exception as e:
-                        st.error(f"第 {idx+1} 份文件 [{file_obj.name}] 识别失败: {e}")
+                        st.error(f"文件 [{file_obj.name}] 解析或入库失败: {e}")
+                    
                     progress_bar.progress((idx + 1) / len(bulk_files))
                 
-                df_errors.to_excel(DB_ERRORS, index=False)
-                st.toast(f"🎉 成功批量处理了 {success_count} 份文件！", icon="🚀")
+                st.toast(f"🎉 成功从题库文件中解析并录入了 {success_count} 道新题！", icon="🚀")
                 st.rerun()
 
-    st.markdown("---")
-    
-    # 复习流展示面板（无缝集成可视化日历追踪机制）
-    if selected_subject:
-        sub_df = df_errors[df_errors["科目"] == selected_subject]
-        today_date = datetime.today().date()
-        today_due_df = sub_df[sub_df["NextReview"] <= today_date] if not sub_df.empty else pd.DataFrame()
-        
-        # 🌟 三模视角控制台
-        view_mode = st.radio("切换复习视角：", [
-            f"🔥 艾宾浩斯今日必刷 ({len(today_due_df)}题)", 
-            f"📚 全量历史全集 ({len(sub_df)}题)",
-            "📅 艾宾浩斯动态日历视图"
-        ], horizontal=True)
-        
-        display_df = pd.DataFrame()
-        
-        if "今日必刷" in view_mode:
-            display_df = today_due_df
-        elif "全集" in view_mode:
-            display_df = sub_df
-        else:
-            # 🚀 日历渲染：直接调用高亮追踪日历网格
-            with st.container(border=True):
-                render_interactive_calendar(df_errors, selected_subject)
+    # --- 通道 3：复习流展示面板 (错题本专区) ---
+    with review_tab3:
+        if not df_errors.empty and selected_subject:
+            # 这里的复习面板只看【错题】
+            sub_df = df_errors[(df_errors["科目"] == selected_subject) & (df_errors["来源"] == "错题")]
+            today_date = datetime.today().date()
+            today_due_df = sub_df[sub_df["NextReview"] <= today_date]
+            
+            view_mode = st.radio("错题本视角：", [f"🔥 今日必刷错题 ({len(today_due_df)})", f"📚 历史错题全集 ({len(sub_df)})"], horizontal=True)
+            display_df = today_due_df if "今日必刷" in view_mode else sub_df
+            
+            if not display_df.empty:
+                q_ids = display_df["题目ID"].tolist()
+                selected_q_id = st.selectbox("🎯 选择攻坚题目：", q_ids)
+                q_row = display_df[display_df["题目ID"] == selected_q_id].iloc[0]
                 
-            if st.session_state.selected_calendar_day:
-                st.markdown(f"📌 **当前已选定查看日期：{st.session_state.selected_calendar_day} 的复习日程：**")
-                display_df = sub_df[sub_df["NextReview"] == st.session_state.selected_calendar_day] if not sub_df.empty else pd.DataFrame()
+                st.session_state.current_focus_content = q_row['题目内容']
+                st.session_state.current_focus_tag = q_row['考点标签']
+                
+                with st.container(border=True):
+                    st.markdown(f"**【{q_row['章节']}】** 考点: `{q_row['考点标签']}` | 历史错误: {q_row['错误次数']}次")
+                    st.info(q_row['题目内容'])
+                    
+                col_btn1, col_btn2 = st.columns(2)
+                if col_btn1.button("🔴 再次遗忘 (明天重刷)", key="btn_forget", use_container_width=True):
+                    if supabase:
+                        supabase.table("errors_table").update({"StageInterval": 1, "NextReview": str(today_date + timedelta(days=1)), "错误次数": int(q_row["错误次数"]) + 1}).eq("题目ID", selected_q_id).execute()
+                        st.rerun()
+                if col_btn2.button("🟢 顺畅掌握 (延长记忆间隔)", key="btn_pass", use_container_width=True):
+                    if supabase:
+                        current_interval = int(q_row["StageInterval"]) if pd.notna(q_row["StageInterval"]) else 1
+                        next_interval = 3 if current_interval == 1 else (7 if current_interval == 3 else current_interval * 2)
+                        supabase.table("errors_table").update({"StageInterval": next_interval, "NextReview": str(today_date + timedelta(days=next_interval))}).eq("题目ID", selected_q_id).execute()
+                        st.rerun()
             else:
-                st.info("💡 请点击上方日历网格中的任意具体日子，即可瞬间下方过滤展示当天的错题攻坚流！")
-        
-        if display_df.empty:
-            if "日历视图" not in view_mode or st.session_state.selected_calendar_day:
-                st.success("🎉 太棒了！选定视角下目前没有需要攻坚的题目。")
-            st.session_state.current_focus_content = ""
-        else:
-            q_ids = display_df["题目ID"].tolist()
-            selected_q_id = st.selectbox("🎯 选定当前正在攻坚的题目编号：", q_ids)
-            q_row = display_df[display_df["题目ID"] == selected_q_id].iloc[0]
-            st.session_state.current_focus_content = q_row['题目内容']
-            
-            with st.container(border=True):
-                c1, c2, c3 = st.columns([1, 1.5, 1.5])
-                c1.markdown(f"📚 **{q_row['科目']}**")
-                c2.markdown(f"🎯 **考点:** {q_row['考点标签']}")
-                c3.markdown(f"⏳ **下一次艾宾浩斯复习日:** {q_row['NextReview']}")
-                st.markdown(f"##### 题目 ID：#{q_row['题目ID']} (历史做错 {q_row['错误次数']} 次)")
-                
-                txt_show = q_row['题目内容'] if pd.notna(q_row['题目内容']) else '（暂无文字描述）'
-                st.info(txt_show)
-                
-                # ✨【核心原图平铺原样渲染】百分之百在大框里无缝展示你的网课原图
-                path = q_row["附件路径"]
-                if pd.notna(path) and path != "" and os.path.exists(path):
-                    if path.lower().endswith(".pdf"):
-                        with open(path, "rb") as f:
-                            st.download_button("📄 打开/下载完整的 PDF 原件", data=f, file_name=os.path.basename(path), key=f"dl_{q_row['题目ID']}")
-                    else:
-                        st.image(path, caption="📸 错题高清原件原图快照", use_container_width=True)
-                else:
-                    st.warning("⚠️ 该条历史记录未成功绑定原件图片，请在上方重新正确录入！")
-            
-            st.markdown("#### 💡 本轮掌握情况")
-            btn_col1, btn_col2 = st.columns(2)
-            if btn_col1.button("🔴 遗忘（没思路，明天强制再刷）", use_container_width=True):
-                idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
-                df_errors.at[idx, "StageInterval"] = 1
-                df_errors.at[idx, "NextReview"] = datetime.today().date() + timedelta(days=1)
-                df_errors.at[idx, "错误次数"] = int(df_errors.at[idx, "错误次数"]) + 1
-                df_errors.to_excel(DB_ERRORS, index=False)
-                st.rerun()
-                
-            if btn_col2.button("🟢 顺畅做对（自动延长记忆间隔）", use_container_width=True):
-                idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
-                current_interval = df_errors.at[idx, "StageInterval"]
-                if pd.isna(current_interval) or current_interval == 0: current_interval = 1
-                next_interval = 3 if current_interval == 1 else (7 if current_interval == 3 else current_interval * 2)
-                df_errors.at[idx, "StageInterval"] = next_interval
-                df_errors.at[idx, "NextReview"] = datetime.today().date() + timedelta(days=int(next_interval))
-                df_errors.to_excel(DB_ERRORS, index=False)
-                st.rerun()
-            
-            # 🗑️ 【历史清理模块】一键永久轰炸抹去坏数据/已学会记录
-            st.markdown("---")
-            if st.button("🗑️ 彻底从错题本中删除此题（清除功能）", use_container_width=True):
-                idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
-                df_errors = df_errors.drop(idx)
-                df_errors.to_excel(DB_ERRORS, index=False)
-                st.toast("🗑️ 该条记录已被永久扔进回收站！", icon="🗑️")
-                st.rerun()
+                st.success("🎉 这个视角下没有需要复习的错题！")
 
-# ==================== 右侧：防平板多发卡死的异步状态机私教舱 ====================
+    # --- 通道 4：抗遗忘每日混合抽题 ---
+    with daily_quiz_tab4:
+        st.markdown("##### 🎲 题库+错题 智能混编测试")
+        st.caption("按 50% 到期错题 + 50% 题库新题 组卷，严格按考点去重防止同质化。")
+        
+        if st.button("🚀 生成今日 10 道专属试卷", type="primary"):
+            if not df_errors.empty:
+                pool = df_errors[df_errors["科目"] == selected_subject]
+                
+                if not pool.empty:
+                    # 1. 从错题池抓取今天到期的题目 (优先)
+                    due_pool = pool[(pool["来源"] == "错题") & (pool["NextReview"] <= datetime.today().date())]
+                    due_samples = due_pool.drop_duplicates(subset=['考点标签']).sample(min(5, len(due_pool)))
+                    
+                    # 2. 从题库池抓取没做过的新题补足 (错误次数=0代表未激活)
+                    bank_pool = pool[(pool["来源"] == "题库") & (pool["错误次数"] == 0) & (~pool["题目ID"].isin(due_samples["题目ID"]))]
+                    bank_samples = bank_pool.drop_duplicates(subset=['考点标签']).sample(min(10 - len(due_samples), len(bank_pool)))
+                    
+                    quiz_df = pd.concat([due_samples, bank_samples]).sample(frac=1).reset_index(drop=True)
+                    
+                    st.markdown("---")
+                    for idx, row in quiz_df.iterrows():
+                        badge = "🔥 历史错题回顾" if row['来源'] == '错题' else "✨ 题库新题尝鲜"
+                        with st.expander(f"题目 {idx+1} | 考点: {row['考点标签']} | {badge}"):
+                            st.write(row['题目内容'])
+                            
+                            # 当你做错一道题库里的新题时，它可以一键转化为“错题”
+                            if row['来源'] == '题库':
+                                if st.button(f"😭 这道新题我做错了，转入错题本！", key=f"fail_{row['题目ID']}"):
+                                    if supabase:
+                                        # 将来源改为错题，错误次数+1，明天复习
+                                        supabase.table("errors_table").update({"来源": "错题", "错误次数": 1, "StageInterval": 1, "NextReview": str(datetime.today().date() + timedelta(days=1))}).eq("题目ID", row['题目ID']).execute()
+                                        st.rerun()
+                else:
+                    st.warning("该科目弹药库为空啦，先去录入或导入题库吧！")
+
+# ------------------------------------------
+# 右侧：私教伴学舱 (融入全量考点联动)
+# ------------------------------------------
 with col_right:
-    st.subheader("🤖 Gemini 考研智能私教舱")
+    st.subheader("🤖 核心推导私教舱")
     
-    focus_content = ""
-    if st.session_state.sandbox_content:
-        focus_content = st.session_state.sandbox_content
-        st.caption("🎯 **联动状态：** 已实时捕获左侧【沙盒暂存区】正在扫描的新错题！")
-    elif "current_focus_content" in st.session_state and st.session_state.current_focus_content:
-        focus_content = st.session_state.current_focus_content
-        st.caption(f"🎯 **联动状态：** 已锁定左侧正在复习的历史题目。")
-    else:
-        st.caption("🔍 **联动状态：** 自由提问模式。")
+    linkage_info = ""
+    if st.session_state.current_focus_tag and not df_errors.empty:
+        # 在整个题库(包含错题和题库新题)中寻找考点关联
+        related_df = df_errors[(df_errors["考点标签"] == st.session_state.current_focus_tag) & (df_errors["题目ID"] != st.session_state.get('selected_q_id', ''))]
+        if not related_df.empty:
+            st.success(f"💡 **考点雷达响应：** 你在 `{st.session_state.current_focus_tag}` 考点上，总题库中还有 {len(related_df)} 道相关资源！")
+            linkage_info = f"系统检索到学生题库中有此考点的储备。关联片段：{related_df.iloc[0]['题目内容'][:50]}..."
 
     for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]): st.write(msg["content"])
+        with st.chat_message(msg["role"]): 
+            st.markdown(msg["content"])
 
-    if user_query := st.chat_input("向 Gemini 提问..."):
+    if user_query := st.chat_input("请求公式推导、或输入你的做题思路求纠错..."):
         if st.session_state.chat_history[-1]["content"] != user_query:
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             st.rerun()
@@ -385,18 +348,21 @@ with col_right:
     if st.session_state.chat_history[-1]["role"] == "user":
         user_msg = st.session_state.chat_history[-1]["content"]
         with st.chat_message("assistant"):
-            with st.spinner("Gemini 正在严密审题并组织考研级得分点推导..."):
+            with st.spinner("系统正在利用严密逻辑网进行推导排版..."):
                 try:
-                    client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
-                    context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。\n"
-                    if selected_subject:
-                        context_prompt += f"当前学生正在复习科目：【{selected_subject}】。\n"
-                    if focus_content:
-                        context_prompt += f"他卡在了这道错题上：\n\"\"\"{focus_content}\"\"\"\n"
-                    context_prompt += f"现在学生向你请教：{user_msg}\n请给出详细解答，支持使用 LaTeX 公式排版。"
+                    context_prompt = (
+                        f"你现在是一位严谨的考研国家线阅卷组专家级导师。\n"
+                        f"请使用最规范的学术语言、严密的逻辑和教科书级别的推导过程解答。\n"
+                        f"所有数学公式必须使用标准的 LaTeX 语法。\n"
+                    )
+                    if selected_subject: context_prompt += f"【当前科目】：{selected_subject}\n"
+                    if st.session_state.current_focus_content: context_prompt += f"【当前攻坚题目】：\n{st.session_state.current_focus_content}\n"
+                    if linkage_info: context_prompt += f"【系统提示导师】：{linkage_info}\n请在解答时进行知识点点拨。\n"
                     
-                    response = client.models.generate_content(model='gemini-2.5-flash', contents=context_prompt)
-                    st.session_state.chat_history.append({"role": "assistant", "content": response.text})
+                    context_prompt += f"\n学生提问：{user_msg}\n导师解答："
+                    
+                    res = ai_client.models.generate_content(model='gemini-2.5-flash', contents=context_prompt)
+                    st.session_state.chat_history.append({"role": "assistant", "content": res.text})
                     st.rerun()
                 except Exception as e:
-                    st.error(f"对话引擎调用失败: {e}")
+                    st.error(f"通讯中断: {e}")
