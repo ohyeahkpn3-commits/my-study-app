@@ -10,7 +10,7 @@ from PIL import Image
 # 1. 网页基础配置
 st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout="wide")
 
-st.title("🧠 Gemini 考研独享舱 (自由掌控完全体)")
+st.title("🧠 Gemini 考研独享舱 (平板直拍满血版)")
 st.markdown("---")
 
 # 2. 🔑 密钥配置区
@@ -63,24 +63,34 @@ with col_left:
     
     upload_tab1, upload_tab2 = st.tabs(["📸 单题 AI 自由智能录入", "⚡ 多文件闪电批量导入"])
     
-    # --- 通道 1：单题自由录入流（不加 Form 装甲，彻底解决平板清空 bug） ---
+    # --- 通道 1：单题自由录入流 ---
     with upload_tab1:
-        st.markdown("##### 1️⃣ 第一步：选取错题原图")
-        uploaded_file = st.file_uploader("点击或拖拽上传错题原件图片", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
+        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板强烈推荐使用摄像头直拍）")
+        
+        # 🌟 平板专用：双通道自由选择
+        upload_mode = st.radio("选择传图媒介：", ["📸 使用平板摄像头直接对着屏幕/试卷拍照", "📁 从系统相册/本地文件选取"], horizontal=True)
+        
+        uploaded_file = None
+        if upload_mode == "📁 从系统相册/本地文件选取":
+            uploaded_file = st.file_uploader("点击上传错题图片", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
+        else:
+            # 🚀 平板黑科技：直接在网页里唤醒镜头，不切后台，绝不断线
+            uploaded_file = st.camera_input("请将平板镜头对准错题或电脑屏幕上的讲义")
         
         if uploaded_file is not None:
-            # 实时原图渲染，让用户百分百看得到图片已经进入网页
+            # 动态生成文件名，确保直拍图和上传图兼容
+            file_name = getattr(uploaded_file, "name", f"camera_{random.randint(100,999)}.jpg")
+            
             st.image(uploaded_file, caption="👀 错题原件已成功读入平板内存，就绪！", use_container_width=True)
             
-            # 如果换了新图片，全自动清空上一题的残余缓存
-            if st.session_state.last_processed_file != uploaded_file.name:
+            if st.session_state.last_processed_file != file_name:
                 st.session_state.sandbox_tag = ""
                 st.session_state.sandbox_content = ""
-                st.session_state.last_processed_file = uploaded_file.name
+                st.session_state.last_processed_file = file_name
             
-            st.markdown("##### 2️⃣ 第二步：提炼错题详情（可自主选择手动或让 AI 填入）")
+            st.markdown("##### 2️⃣ 第二步：提炼错题详情")
             if st.button("🤖 召唤 Gemini 视觉引擎帮我全自动审题抠字", type="secondary"):
-                with st.spinner("🔮 Gemini 正在深度分析手拍图，自动提炼考点及 LaTeX 公式..."):
+                with st.spinner("🔮 Gemini 正在深度分析快照，自动提炼考点及 LaTeX 公式..."):
                     try:
                         client = genai.Client(api_key=GEMINI_FREE_API_KEY)
                         prompt = (
@@ -89,7 +99,9 @@ with col_left:
                             "考点: [请根据题目内容，精准提炼出1-2个核心薄弱考点标签，如：矩阵的特征值、拉格朗日中值定理、定积分等]\n"
                             "题目内容: [请利用 Markdown 和 LaTeX 语法，把图片里的题目文本、数字、数学公式极其严密完整地抠出来并排版]"
                         )
-                        mime_type = "application/pdf" if uploaded_file.name.lower().endswith(".pdf") else "image/jpeg"
+                        
+                        # 统一转换为字节流传入
+                        mime_type = "application/pdf" if file_name.lower().endswith(".pdf") else "image/jpeg"
                         doc_part = types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=mime_type)
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
                         ai_res = response.text
@@ -112,15 +124,14 @@ with col_left:
                     except Exception as e:
                         st.error(f"❌ Gemini 引擎分析失败: {e}")
             
-            # 🔓 彻底解锁科目完全自定义填写与选择
             st.markdown("---")
-            base_subjects = ["高等数学", "线性代数", "考研英语", "专业课控制类"]
+            base_subjects = ["高等数学", "线性代数", "考研英语", "专业课"]
             combined_subs = sorted(list(set(base_subjects + existing_subjects)))
             
             sub_choice = st.selectbox("🎯 选择已有科目标签（或在下方手写新科目）:", options=["-- ✍️ 自定义手写新科目 --"] + combined_subs)
             
             if sub_choice == "-- ✍️ 自定义手写新科目 --":
-                sub_final = st.text_input("📝 请在此手动输入你的新科目名称（例如：高等数学、英语二）：", value="")
+                sub_final = st.text_input("📝 请在此手动输入你的新科目名称（例如：高等数学二、英语一）：", value="")
             else:
                 sub_final = sub_choice
                 
@@ -132,8 +143,8 @@ with col_left:
                     st.error("❌ 归档失败：科目名称不能为空，请输入或选择一个科目！")
                 else:
                     try:
-                        f_path = os.path.join(MEDIA_DIR, uploaded_file.name)
-                        with open(f_path, "wb") as f: f.write(uploaded_file.getbuffer())
+                        f_path = os.path.join(MEDIA_DIR, file_name)
+                        with open(f_path, "wb") as f: f.write(uploaded_file.getvalue())
                         
                         new_row = {
                             "题目ID": f"GEM_{random.randint(100,999)}", "科目": sub_final.strip(),
@@ -145,7 +156,6 @@ with col_left:
                         df_errors = pd.concat([df_errors, pd.DataFrame([new_row])], ignore_index=True)
                         df_errors.to_excel(DB_ERRORS, index=False)
                         
-                        # 斩断数据状态，完美刷新
                         st.session_state.sandbox_tag = ""
                         st.session_state.sandbox_content = ""
                         st.toast("🎉 错题原图与分析结果已完美合流进艾宾浩斯记忆库！", icon="✅")
@@ -172,7 +182,7 @@ with col_left:
                 for idx, file_obj in enumerate(bulk_files):
                     try:
                         f_path = os.path.join(MEDIA_DIR, file_obj.name)
-                        with open(f_path, "wb") as f: f.write(file_obj.getbuffer())
+                        with open(f_path, "wb") as f: f.write(file_obj.getvalue())
                         
                         prompt = (
                             "请帮我把这个文件里的题目文本、 LaTex格式的公式完整抠出来并排版好。\n"
@@ -216,7 +226,7 @@ with col_left:
 
     st.markdown("---")
     
-    # 复习流展示大面板
+    # 复戏流展示大面板
     if selected_subject:
         sub_df = df_errors[df_errors["科目"] == selected_subject]
         today_date = datetime.today().date()
@@ -260,7 +270,6 @@ with col_left:
                 txt_show = q_row['题目内容'] if pd.notna(q_row['题目内容']) else '（暂无文字描述）'
                 st.info(txt_show)
                 
-                # ✨【核心原图渲染舱】百分之百在大框里无缝展示平板拍下的原图原件！
                 path = q_row["附件路径"]
                 if pd.notna(path) and path != "" and os.path.exists(path):
                     if path.lower().endswith(".pdf"):
@@ -313,7 +322,7 @@ with col_right:
             with st.spinner("Gemini 正在严密审题并组织考研级得分点推导..."):
                 try:
                     client = genai.Client(api_key=GEMINI_FREE_API_KEY)
-                    context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。"
+                    context_prompt = f"针对硕士研究生入学考试 standard 进行深度推导排版。"
                     if selected_subject:
                         context_prompt += f"当前学生正在复习科目：【{selected_subject}】。\n"
                     if 'current_focus_content' in locals() and current_focus_content:
