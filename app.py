@@ -13,7 +13,7 @@ st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout
 st.title("🧠 Gemini 考研独享舱 (平板直拍满血版)")
 st.markdown("---")
 
-# 2. 🔑 密钥配置区
+# 2. 🔑 密钥配置区 (安全暗号对接，绝不泄露)
 GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
 
 # 3. 数据库与目录初始化
@@ -65,13 +65,13 @@ with col_left:
     
     # --- 通道 1：单题自由录入流 ---
     with upload_tab1:
-        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板强烈推荐使用摄像头直拍）")
+        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板大屏推荐使用分屏拖拽或直拍）")
         
         upload_mode = st.radio("选择传图媒介：", ["📸 使用平板摄像头直接对着屏幕/试卷拍照", "📁 从系统相册/本地文件选取"], horizontal=True)
         
         uploaded_file = None
         if upload_mode == "📁 从系统相册/本地文件选取":
-            uploaded_file = st.file_uploader("点击上传错题图片", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
+            uploaded_file = st.file_uploader("点击上传错题图片（支持相册直接拖拽入内）", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
         else:
             uploaded_file = st.camera_input("请将平板镜头对准错题或电脑屏幕上的讲义")
         
@@ -296,7 +296,7 @@ with col_left:
                 df_errors.to_excel(DB_ERRORS, index=False)
                 st.rerun()
             
-            # ✨【新增硬核组件】一键轰炸清除坏数据
+            # 🗑️ 一键轰炸清除坏数据组件
             st.markdown("---")
             if st.button("🗑️ 彻底从错题本中删除此题（清除残留历史记录）", use_container_width=True):
                 idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
