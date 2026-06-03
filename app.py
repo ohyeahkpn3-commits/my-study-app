@@ -67,18 +67,15 @@ with col_left:
     with upload_tab1:
         st.markdown("##### 1️⃣ 第一步：选择传图方式（平板强烈推荐使用摄像头直拍）")
         
-        # 🌟 平板专用：双通道自由选择
         upload_mode = st.radio("选择传图媒介：", ["📸 使用平板摄像头直接对着屏幕/试卷拍照", "📁 从系统相册/本地文件选取"], horizontal=True)
         
         uploaded_file = None
         if upload_mode == "📁 从系统相册/本地文件选取":
             uploaded_file = st.file_uploader("点击上传错题图片", type=["png", "jpg", "jpeg", "pdf"], key="tablet_uploader")
         else:
-            # 🚀 平板黑科技：直接在网页里唤醒镜头，不切后台，绝不断线
             uploaded_file = st.camera_input("请将平板镜头对准错题或电脑屏幕上的讲义")
         
         if uploaded_file is not None:
-            # 动态生成文件名，确保直拍图和上传图兼容
             file_name = getattr(uploaded_file, "name", f"camera_{random.randint(100,999)}.jpg")
             
             st.image(uploaded_file, caption="👀 错题原件已成功读入平板内存，就绪！", use_container_width=True)
@@ -100,7 +97,6 @@ with col_left:
                             "题目内容: [请利用 Markdown 和 LaTeX 语法，把图片里的题目文本、数字、数学公式极其严密完整地抠出来并排版]"
                         )
                         
-                        # 统一转换为字节流传入
                         mime_type = "application/pdf" if file_name.lower().endswith(".pdf") else "image/jpeg"
                         doc_part = types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=mime_type)
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
@@ -226,7 +222,7 @@ with col_left:
 
     st.markdown("---")
     
-    # 复戏流展示大面板
+    # 复习流展示大面板
     if selected_subject:
         sub_df = df_errors[df_errors["科目"] == selected_subject]
         today_date = datetime.today().date()
@@ -299,6 +295,15 @@ with col_left:
                 df_errors.at[idx, "NextReview"] = datetime.today().date() + timedelta(days=int(next_interval))
                 df_errors.to_excel(DB_ERRORS, index=False)
                 st.rerun()
+            
+            # ✨【新增硬核组件】一键轰炸清除坏数据
+            st.markdown("---")
+            if st.button("🗑️ 彻底从错题本中删除此题（清除残留历史记录）", use_container_width=True):
+                idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
+                df_errors = df_errors.drop(idx)
+                df_errors.to_excel(DB_ERRORS, index=False)
+                st.toast("🗑️ 该坏记录已被永久扔进回收站！", icon="🗑️")
+                st.rerun()
 
 # ==================== 右侧：原生高科技 Gemini 备考聊天流 ====================
 with col_right:
@@ -322,7 +327,7 @@ with col_right:
             with st.spinner("Gemini 正在严密审题并组织考研级得分点推导..."):
                 try:
                     client = genai.Client(api_key=GEMINI_FREE_API_KEY)
-                    context_prompt = f"针对硕士研究生入学考试 standard 进行深度推导排版。"
+                    context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。"
                     if selected_subject:
                         context_prompt += f"当前学生正在复习科目：【{selected_subject}】。\n"
                     if 'current_focus_content' in locals() and current_focus_content:
