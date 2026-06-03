@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import random
+import calendar
 from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
@@ -10,11 +11,19 @@ from PIL import Image
 # 1. 网页基础配置
 st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout="wide")
 
-st.title("🧠 Gemini 考研独享舱 (平板直拍满血版)")
+st.title("🧠 Gemini 考研独享舱 (日历可视化最终完全体)")
 st.markdown("---")
 
-# 2. 🔑 密钥配置区 (已贴入最新有效API密钥)
-GEMINI_FREE_API_KEY = "AQ.Ab8RNK8_YKIZXBP5rb1yrvhM0x6RYLD3YG4N8HubHDfIl9l_g"
+# 2. 🔑 密钥配置区（已完美切回隐藏保险箱，100% 保护你的隐私安全）
+GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
+
+# 🛠️ 网络头装甲：强行注入自定义头，彻底破除 SDK 对非 AIzaSy 开头新密钥误判为 Bearer 令牌的底层 Bug
+CORE_HTTP_OPTIONS = {
+    "headers": {
+        "x-goog-api-key": GEMINI_FREE_API_KEY,
+        "Authorization": ""  # 极其关键：强行抹除并清空被 SDK 误注入的 Bearer 认证头，解开 401 死锁
+    }
+}
 
 # 3. 数据库与目录初始化
 MEDIA_DIR = "uploaded_media"
@@ -48,8 +57,45 @@ else:
 if "sandbox_tag" not in st.session_state: st.session_state.sandbox_tag = ""
 if "sandbox_content" not in st.session_state: st.session_state.sandbox_content = ""
 if "last_processed_file" not in st.session_state: st.session_state.last_processed_file = None
+if "selected_calendar_day" not in st.session_state: st.session_state.selected_calendar_day = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [{"role": "assistant", "content": "你好！我是你的考研全科 AI 助教。左侧题目扫描成功后，我已实时同步进我的大脑。请随时向我提问，我将用最严密的逻辑为你进行全步骤公式推导排版！"}]
+
+# 💡 辅助函数：绘制真正支持高亮和交互的可视化日历
+def render_interactive_calendar(df, subject):
+    st.markdown(f"##### 📅 【{subject}】艾宾浩斯复习热力月历")
+    today = datetime.today()
+    year, month = today.year, today.month
+    
+    # 提取本月该科目所有有复习任务的日期
+    subject_df = df[df["科目"] == subject] if not df.empty else pd.DataFrame()
+    task_days = []
+    if not subject_df.empty:
+        task_days = subject_df["NextReview"].apply(lambda x: x.day if x.month == month and x.year == year else 0).tolist()
+        task_days = [d for d in task_days if d != 0]
+
+    cal = calendar.monthcalendar(year, month)
+    
+    # 绘制星期头
+    cols_head = st.columns(7)
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    for i, col in enumerate(cols_head):
+        col.markdown(f"<center>**{weekdays[i]}**</center>", unsafe_allowed_html=True)
+        
+    # 循环绘制日期网格按钮
+    for week in cal:
+        cols_day = st.columns(7)
+        for i, day in enumerate(week):
+            if day == 0:
+                cols_day[i].write("")
+            else:
+                has_task = day in task_days
+                # 如果当天有复习任务，名字后面挂个火苗 🔥
+                btn_label = f"{day} 🔥" if has_task else f"{day}"
+                
+                # 平板点击按钮，直接锁定当天日期数据
+                if cols_day[i].button(btn_label, key=f"btn_cal_{day}_{random.randint(1000,9999)}", use_container_width=True):
+                    st.session_state.selected_calendar_day = datetime(year, month, day).date()
 
 # 5. 页面大布局：左右分栏
 col_left, col_right = st.columns([3, 2])
@@ -67,7 +113,7 @@ with col_left:
     
     # --- 通道 1：单题自由录入流 ---
     with upload_tab1:
-        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板大屏推荐使用分屏拖拽或直拍）")
+        st.markdown("##### 1️⃣ 第一步：选择传图方式（平板大屏强烈推荐使用相册分屏拖拽或直拍）")
         
         upload_mode = st.radio("选择传图媒介：", ["📸 使用平板摄像头直接对着屏幕/试卷拍照", "📁 从系统相册/本地文件选取"], horizontal=True)
         
@@ -91,7 +137,7 @@ with col_left:
             if st.button("🤖 召唤 Gemini 视觉引擎帮我全自动审题抠字", type="secondary"):
                 with st.spinner("🔮 Gemini 正在深度分析快照，自动提炼考点及 LaTeX 公式..."):
                     try:
-                        client = genai.Client(api_key=GEMINI_FREE_API_KEY)
+                        client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
                         prompt = (
                             "你是一个极其专业的考研错题智能分析专家。请仔细阅读我上传的错题图片。\n"
                             "请严格按照以下格式输出你的分析结果，不要带有任何多余的客套话或解释文本：\n"
@@ -175,7 +221,7 @@ with col_left:
             else:
                 progress_bar = st.progress(0)
                 success_count = 0
-                client = genai.Client(api_key=GEMINI_FREE_API_KEY)
+                client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
                 
                 for idx, file_obj in enumerate(bulk_files):
                     try:
@@ -224,16 +270,17 @@ with col_left:
 
     st.markdown("---")
     
-    # 复习流展示大面板
+    # 复习流展示面板（无缝集成可视化日历追踪机制）
     if selected_subject:
         sub_df = df_errors[df_errors["科目"] == selected_subject]
         today_date = datetime.today().date()
         today_due_df = sub_df[sub_df["NextReview"] <= today_date] if not sub_df.empty else pd.DataFrame()
         
+        # 🌟 三模视角控制台
         view_mode = st.radio("切换复习视角：", [
             f"🔥 艾宾浩斯今日必刷 ({len(today_due_df)}题)", 
             f"📚 全量历史全集 ({len(sub_df)}题)",
-            "📅 按日历日期回顾"
+            "📅 艾宾浩斯动态日历视图"
         ], horizontal=True)
         
         display_df = pd.DataFrame()
@@ -243,13 +290,19 @@ with col_left:
         elif "全集" in view_mode:
             display_df = sub_df
         else:
-            st.markdown("##### 🗓️ 错题时间轴")
-            selected_date = st.date_input("请选择你想查看哪一天录入的错题：", value=datetime.today().date())
-            display_df = sub_df[sub_df["录入日期"] == selected_date] if not sub_df.empty else pd.DataFrame()
-            st.info(f"在 {selected_date} 这一天，共记录了 {len(display_df)} 道题目。")
+            # 🚀 日历渲染：直接调用高亮追踪日历网格
+            with st.container(border=True):
+                render_interactive_calendar(df_errors, selected_subject)
+                
+            if st.session_state.selected_calendar_day:
+                st.markdown(f"📌 **当前已选定查看日期：{st.session_state.selected_calendar_day} 的复习日程：**")
+                display_df = sub_df[sub_df["NextReview"] == st.session_state.selected_calendar_day] if not sub_df.empty else pd.DataFrame()
+            else:
+                st.info("💡 请点击上方日历网格中的任意具体日子，即可瞬间下方过滤展示当天的错题攻坚流！")
         
         if display_df.empty:
-            st.success("这个视图下目前没有题目哦。")
+            if "日历视图" not in view_mode or st.session_state.selected_calendar_day:
+                st.success("🎉 太棒了！选定视角下目前没有需要攻坚的题目。")
             st.session_state.current_focus_content = ""
         else:
             q_ids = display_df["题目ID"].tolist()
@@ -261,19 +314,20 @@ with col_left:
                 c1, c2, c3 = st.columns([1, 1.5, 1.5])
                 c1.markdown(f"📚 **{q_row['科目']}**")
                 c2.markdown(f"🎯 **考点:** {q_row['考点标签']}")
-                c3.markdown(f"⏳ **生成日期:** {q_row['录入日期']}")
+                c3.markdown(f"⏳ **下一次艾宾浩斯复习日:** {q_row['NextReview']}")
                 st.markdown(f"##### 题目 ID：#{q_row['题目ID']} (历史做错 {q_row['错误次数']} 次)")
                 
                 txt_show = q_row['题目内容'] if pd.notna(q_row['题目内容']) else '（暂无文字描述）'
                 st.info(txt_show)
                 
+                # ✨【核心原图平铺原样渲染】百分之百在大框里无缝展示你的网课原图
                 path = q_row["附件路径"]
                 if pd.notna(path) and path != "" and os.path.exists(path):
                     if path.lower().endswith(".pdf"):
                         with open(path, "rb") as f:
                             st.download_button("📄 打开/下载完整的 PDF 原件", data=f, file_name=os.path.basename(path), key=f"dl_{q_row['题目ID']}")
                     else:
-                        st.image(path, caption="📸 错题原件高清快照", use_container_width=True)
+                        st.image(path, caption="📸 错题高清原件原图快照", use_container_width=True)
                 else:
                     st.warning("⚠️ 该条历史记录未成功绑定原件图片，请在上方重新正确录入！")
             
@@ -297,19 +351,19 @@ with col_left:
                 df_errors.to_excel(DB_ERRORS, index=False)
                 st.rerun()
             
+            # 🗑️ 【历史清理模块】一键永久轰炸抹去坏数据/已学会记录
             st.markdown("---")
-            if st.button("🗑️ 彻底从错题本中删除此题（清除残留历史记录）", use_container_width=True):
+            if st.button("🗑️ 彻底从错题本中删除此题（清除功能）", use_container_width=True):
                 idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
                 df_errors = df_errors.drop(idx)
                 df_errors.to_excel(DB_ERRORS, index=False)
-                st.toast("🗑️ 该坏记录已被永久扔进回收站！", icon="🗑️")
+                st.toast("🗑️ 该条记录已被永久扔进回收站！", icon="🗑️")
                 st.rerun()
 
-# ==================== 右侧：防手机/平板双击卡死的异步原子状态机私教舱 ====================
+# ==================== 右侧：防平板多发卡死的异步状态机私教舱 ====================
 with col_right:
     st.subheader("🤖 Gemini 考研智能私教舱")
     
-    # 智能联动判定
     focus_content = ""
     if st.session_state.sandbox_content:
         focus_content = st.session_state.sandbox_content
@@ -320,24 +374,20 @@ with col_right:
     else:
         st.caption("🔍 **联动状态：** 自由提问模式。")
 
-    # 渲染历史对话
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]): st.write(msg["content"])
 
-    # 接收新输入（防平板多按回车重载漏洞的异步拦截器）
     if user_query := st.chat_input("向 Gemini 提问..."):
-        # 严格校验防抖：禁止向历史最后一条重复追问，防止平板键盘双击导致死锁
         if st.session_state.chat_history[-1]["content"] != user_query:
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             st.rerun()
 
-    # 原子级渲染触发：当前最后一条消息是用户发送时，才在本次运行独立调用大模型
     if st.session_state.chat_history[-1]["role"] == "user":
         user_msg = st.session_state.chat_history[-1]["content"]
         with st.chat_message("assistant"):
             with st.spinner("Gemini 正在严密审题并组织考研级得分点推导..."):
                 try:
-                    client = genai.Client(api_key=GEMINI_FREE_API_KEY)
+                    client = genai.Client(api_key=GEMINI_FREE_API_KEY, http_options=CORE_HTTP_OPTIONS)
                     context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。\n"
                     if selected_subject:
                         context_prompt += f"当前学生正在复习科目：【{selected_subject}】。\n"
