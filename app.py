@@ -10,12 +10,11 @@ from PIL import Image
 # 1. 网页基础配置
 st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout="wide")
 
-st.title("🧠 Gemini 考研独享舱 (日历追踪 + 艾宾浩斯引擎)")
+st.title("🧠 Gemini 考研独享舱 (原子级稳定版)")
 st.markdown("---")
 
-# 2. 🔑 密钥配置区
+# 2. 🔑 密钥配置区（已升级官方安全隐私调用）
 GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
-
 
 # 3. 数据库与目录初始化
 MEDIA_DIR = "uploaded_media"
@@ -29,7 +28,8 @@ def load_data():
             if "录入日期" not in df.columns:
                 df["录入日期"] = datetime.today().date()
             return df
-        except: pass
+        except Exception as e:
+            st.error(f"⚠️ 数据库读取流发生异常: {e}")
     return pd.DataFrame(columns=["题目ID", "科目", "考点标签", "题目内容", "错误次数", "附件路径", "NextReview", "StageInterval", "录入日期"])
 
 df_errors = load_data()
@@ -38,7 +38,7 @@ if not df_errors.empty:
     df_errors["NextReview"] = pd.to_datetime(df_errors["NextReview"]).dt.date
     df_errors["录入日期"] = pd.to_datetime(df_errors["录入日期"]).dt.date
 
-# 4. 核心逻辑：从数据库里动态提取所有科目
+# 4. 从数据库里动态提取所有科目
 if not df_errors.empty and "科目" in df_errors.columns:
     existing_subjects = sorted(list(df_errors["科目"].dropna().unique().tolist()))
 else:
@@ -54,77 +54,83 @@ with col_left:
     if existing_subjects:
         selected_subject = st.segmented_control("🏷️ **当前正在复习的科目：**", options=existing_subjects, default=existing_subjects[0])
     else:
-        st.info("💡 你的智能错题本目前还是空的哦！请使用下方组件批量拍图或上传PDF讲义开始吧！")
+        st.info("💡 你的智能错题本目前还是空的哦！请使用下方表单批量拍图或上传PDF讲义开始吧！")
     
     upload_tab1, upload_tab2 = st.tabs(["📸 单题手拍/PDF快记", "⚡ 多文件闪电批量导入"])
     
     # --- 通道 1：单题拍照/PDF ---
     with upload_tab1:
-        uploaded_file = st.file_uploader("上传当前错题图片或 PDF 讲义", type=["png", "jpg", "jpeg", "pdf"], key="single_file")
-        
-        if "gemini_subject" not in st.session_state: st.session_state.gemini_subject = ""
-        if "gemini_content" not in st.session_state: st.session_state.gemini_content = ""
-        
-        if uploaded_file is not None and st.button("🤖 召唤 Gemini 视觉引擎提取内容", key="btn_single"):
-            try:
-                with st.spinner("Gemini 正在全神贯注地审阅您的文件..."):
-                    client = genai.Client(api_key=GEMINI_FREE_API_KEY)
-                    prompt = (
-                        "你是一个极其专业的考研错题智能扫描仪。请仔细阅读并看懂我上传的文件里的题目内容。\n"
-                        "请严格按照以下格式输出你的分析结果，不要带有任何多余的解释文字：\n"
-                        "考点: [请提取1-2个核心薄弱考点标签，用逗号隔开]\n"
-                        "题目内容: [请把文件里的题目文本、数字、LaTex格式的数学公式完整抠出来并排版好]"
-                    )
-                    
-                    mime_type = "application/pdf" if uploaded_file.name.lower().endswith(".pdf") else "image/jpeg"
-                    doc_part = types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=mime_type)
-                    
-                    response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
-                    st.session_state.gemini_subject = selected_subject if selected_subject else ""
-                    st.session_state.gemini_content = response.text
-            except Exception as e:
-                st.error(f"Gemini 引擎调用失败: {e}")
-                    
-        with st.form("add_form", clear_on_submit=True):
+        with st.form("single_upload_form", clear_on_submit=False):
+            uploaded_file = st.file_uploader("上传当前错题图片或 PDF 讲义", type=["png", "jpg", "jpeg", "pdf"], key="single_file")
             default_sub_name = selected_subject if selected_subject else ""
-            sub_m = st.text_input("新建或确认科目 Label", value=st.session_state.gemini_subject if st.session_state.gemini_subject else default_sub_name)
+            sub_m = st.text_input("新建或确认科目 Label", value=default_sub_name)
             tag_m = st.text_input("确认考点标签")
-            txt_m = st.text_area("题目文本描述", value=st.session_state.gemini_content)
+            txt_m = st.text_area("题目文本描述（选填，留空则由 AI 自动扫描填入）", height=150)
+            submit_single = st.form_submit_button("💾 确认此题安全入库", type="primary")
             
-            if st.form_submit_button("确认单题入库 💾"):
-                if not sub_m.strip():
-                    st.error("❌ 科目名称不能为空！")
-                else:
-                    f_path = ""
-                    if uploaded_file is not None:
-                        f_path = os.path.join(MEDIA_DIR, uploaded_file.name)
-                        with open(f_path, "wb") as f: f.write(uploaded_file.getbuffer())
-                    
-                    new_row = {
-                        "题目ID": f"GEM_{random.randint(100,999)}", "科目": sub_m.strip(),
-                        "考点标签": tag_m.strip(), "题目内容": txt_m.strip(), "错误次数": 1, "附件路径": f_path,
-                        "NextReview": datetime.today().date(), "StageInterval": 1,
-                        "录入日期": datetime.today().date()
-                    }
-                    df_errors = pd.concat([df_errors, pd.DataFrame([new_row])], ignore_index=True)
-                    df_errors.to_excel(DB_ERRORS, index=False)
-                    st.session_state.gemini_subject = ""; st.session_state.gemini_content = ""
-                    st.success(f"同步成功！")
-                    st.rerun()
+        if submit_single:
+            if not sub_m.strip():
+                st.error("❌ 科目名称不能为空！")
+            else:
+                with st.spinner("正在安全同步并召唤 Gemini 视觉引擎分析..."):
+                    try:
+                        f_path = ""
+                        final_content = txt_m.strip()
+                        final_tag = tag_m.strip()
+                        
+                        if uploaded_file is not None:
+                            f_path = os.path.join(MEDIA_DIR, uploaded_file.name)
+                            with open(f_path, "wb") as f: f.write(uploaded_file.getbuffer())
+                            
+                            if not final_content:
+                                client = genai.Client(api_key=GEMINI_FREE_API_KEY)
+                                prompt = (
+                                    "你是一个极其专业的考研错题智能扫描仪。请仔细阅读并看懂我上传的文件里的题目内容。\n"
+                                    "请严格按照以下格式输出你的分析结果，不要带有任何多余的解释文字：\n"
+                                    "考点: [请提取1-2个核心薄弱考点标签，用逗号隔开]\n"
+                                    "题目内容: [请把文件里的题目文本、数字、LaTex格式的数学公式完整抠出来并排版好]"
+                                )
+                                mime_type = "application/pdf" if uploaded_file.name.lower().endswith(".pdf") else "image/jpeg"
+                                doc_part = types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=mime_type)
+                                response = client.models.generate_content(model='gemini-2.5-flash', contents=[doc_part, prompt])
+                                ai_res = response.text
+                                final_content = ai_res
+                                if "考点:" in ai_res and not final_tag:
+                                    try: final_tag = ai_res.split("考点:")[1].split("\n")[0].strip()
+                                    except: pass
 
-    # --- 通道 2：图片/PDF 混传批量导入 ---
+                        new_row = {
+                            "题目ID": f"GEM_{random.randint(100,999)}", "科目": sub_m.strip(),
+                            "考点标签": final_tag if final_tag else "基础录入", "题目内容": final_content if final_content else "图片题目", 
+                            "错误次数": 1, "附件路径": f_path, "NextReview": datetime.today().date(), "StageInterval": 1,
+                            "录入日期": datetime.today().date()
+                        }
+                        df_errors = pd.concat([df_errors, pd.DataFrame([new_row])], ignore_index=True)
+                        df_errors.to_excel(DB_ERRORS, index=False)
+                        st.toast("🎉 单题成功合流进艾宾浩斯记忆库！", icon="✅")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"同步失败: {e}")
+
+    # --- 通道 2：图片/PDF 混传批量表单 ---
     with upload_tab2:
-        bulk_files = st.file_uploader(
-            "选取多份错题文件（支持图片与 PDF 混选）", 
-            type=["png", "jpg", "jpeg", "pdf"], 
-            accept_multiple_files=True,
-            key="bulk_uploader"
-        )
+        st.markdown("### ⚡ 平板特权：文件矩阵批量扫描")
+        st.caption("💡 彻底解决假死：使用强绑定表单，确保您的多张错题快照稳妥打包发射。")
         
-        if bulk_files:
+        with st.form("bulk_data_armored_form"):
+            bulk_files = st.file_uploader(
+                "选取多份错题文件（支持图片与 PDF 混选）", 
+                type=["png", "jpg", "jpeg", "pdf"], 
+                accept_multiple_files=True,
+                key="bulk_uploader"
+            )
             bulk_sub_default = st.text_input("为这批文件设定目标【科目Label】", value=selected_subject if selected_subject else "高等数学")
+            submit_bulk = st.form_submit_button("🚀 启动 Gemini 流水线批量合流", type="primary")
             
-            if st.button("🚀 启动 Gemini 流水线批量合流", type="primary"):
+        if submit_bulk:
+            if not bulk_files:
+                st.warning("⚠️ 您还没有选中任何图片或 PDF 文件哦，请先点上方组件选择文件。")
+            else:
                 progress_bar = st.progress(0)
                 success_count = 0
                 client = genai.Client(api_key=GEMINI_FREE_API_KEY)
@@ -168,7 +174,7 @@ with col_left:
                     progress_bar.progress((idx + 1) / len(bulk_files))
                 
                 df_errors.to_excel(DB_ERRORS, index=False)
-                st.success(f"🎉 闪电流水线完成！成功处理了 {success_count} 份文件！")
+                st.toast(f"🎉 闪电流水线完成！成功处理了 {success_count} 份文件！", icon="🚀")
                 st.rerun()
 
     st.markdown("---")
