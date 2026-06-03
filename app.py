@@ -14,8 +14,8 @@ st.title("🧠 Gemini 考研独享舱 (日历追踪 + 艾宾浩斯引擎)")
 st.markdown("---")
 
 # 2. 🔑 密钥配置区
-GEMINI_FREE_API_KEY = "GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
-"
+GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
+
 
 # 3. 数据库与目录初始化
 MEDIA_DIR = "uploaded_media"
