@@ -13,8 +13,8 @@ st.set_page_config(page_title="Gemini 考研全效艾宾浩斯工作台", layout
 st.title("🧠 Gemini 考研独享舱 (平板直拍满血版)")
 st.markdown("---")
 
-# 2. 🔑 密钥配置区 (安全暗号对接，绝不泄露)
-GEMINI_FREE_API_KEY = st.secrets["GEMINI_API_KEY"]
+# 2. 🔑 密钥配置区 (已贴入最新有效API密钥)
+GEMINI_FREE_API_KEY = "AQ.Ab8RNK8_YKIZXBP5rb1yrvhM0x6RYLD3YG4N8HubHDfIl9l_g"
 
 # 3. 数据库与目录初始化
 MEDIA_DIR = "uploaded_media"
@@ -48,6 +48,8 @@ else:
 if "sandbox_tag" not in st.session_state: st.session_state.sandbox_tag = ""
 if "sandbox_content" not in st.session_state: st.session_state.sandbox_content = ""
 if "last_processed_file" not in st.session_state: st.session_state.last_processed_file = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [{"role": "assistant", "content": "你好！我是你的考研全科 AI 助教。左侧题目扫描成功后，我已实时同步进我的大脑。请随时向我提问，我将用最严密的逻辑为你进行全步骤公式推导排版！"}]
 
 # 5. 页面大布局：左右分栏
 col_left, col_right = st.columns([3, 2])
@@ -246,15 +248,14 @@ with col_left:
             display_df = sub_df[sub_df["录入日期"] == selected_date] if not sub_df.empty else pd.DataFrame()
             st.info(f"在 {selected_date} 这一天，共记录了 {len(display_df)} 道题目。")
         
-        current_focus_content = ""
-        
         if display_df.empty:
             st.success("这个视图下目前没有题目哦。")
+            st.session_state.current_focus_content = ""
         else:
             q_ids = display_df["题目ID"].tolist()
             selected_q_id = st.selectbox("🎯 选定当前正在攻坚的题目编号：", q_ids)
             q_row = display_df[display_df["题目ID"] == selected_q_id].iloc[0]
-            current_focus_content = q_row['题目内容']
+            st.session_state.current_focus_content = q_row['题目内容']
             
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 1.5, 1.5])
@@ -296,7 +297,6 @@ with col_left:
                 df_errors.to_excel(DB_ERRORS, index=False)
                 st.rerun()
             
-            # 🗑️ 一键轰炸清除坏数据组件
             st.markdown("---")
             if st.button("🗑️ 彻底从错题本中删除此题（清除残留历史记录）", use_container_width=True):
                 idx = df_errors[df_errors["题目ID"] == selected_q_id].index[0]
@@ -305,37 +305,48 @@ with col_left:
                 st.toast("🗑️ 该坏记录已被永久扔进回收站！", icon="🗑️")
                 st.rerun()
 
-# ==================== 右侧：原生高科技 Gemini 备考聊天流 ====================
+# ==================== 右侧：防手机/平板双击卡死的异步原子状态机私教舱 ====================
 with col_right:
     st.subheader("🤖 Gemini 考研智能私教舱")
-    if selected_subject and 'selected_q_id' in locals() and current_focus_content:
-        st.caption(f"🎯 **联动状态：** 已自动锁定左侧【{selected_subject}】题目 `#{selected_q_id}`。")
+    
+    # 智能联动判定
+    focus_content = ""
+    if st.session_state.sandbox_content:
+        focus_content = st.session_state.sandbox_content
+        st.caption("🎯 **联动状态：** 已实时捕获左侧【沙盒暂存区】正在扫描的新错题！")
+    elif "current_focus_content" in st.session_state and st.session_state.current_focus_content:
+        focus_content = st.session_state.current_focus_content
+        st.caption(f"🎯 **联动状态：** 已锁定左侧正在复习的历史题目。")
     else:
         st.caption("🔍 **联动状态：** 自由提问模式。")
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [{"role": "assistant", "content": "你好！我是你的考研全科 AI 助教。请随时向我提问，我将用最严密的逻辑为你进行全步骤推导排版！"}]
-
+    # 渲染历史对话
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]): st.write(msg["content"])
 
+    # 接收新输入（防平板多按回车重载漏洞的异步拦截器）
     if user_query := st.chat_input("向 Gemini 提问..."):
-        with st.chat_message("user"): st.write(user_query)
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        # 严格校验防抖：禁止向历史最后一条重复追问，防止平板键盘双击导致死锁
+        if st.session_state.chat_history[-1]["content"] != user_query:
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            st.rerun()
 
+    # 原子级渲染触发：当前最后一条消息是用户发送时，才在本次运行独立调用大模型
+    if st.session_state.chat_history[-1]["role"] == "user":
+        user_msg = st.session_state.chat_history[-1]["content"]
         with st.chat_message("assistant"):
             with st.spinner("Gemini 正在严密审题并组织考研级得分点推导..."):
                 try:
                     client = genai.Client(api_key=GEMINI_FREE_API_KEY)
-                    context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。"
+                    context_prompt = f"针对硕士研究生入学考试标准进行深度推导排版。\n"
                     if selected_subject:
                         context_prompt += f"当前学生正在复习科目：【{selected_subject}】。\n"
-                    if 'current_focus_content' in locals() and current_focus_content:
-                        context_prompt += f"他卡在了这道错题上：\n\"\"\"{current_focus_content}\"\"\"\n"
-                    context_prompt += f"现在学生向你请教：{user_query}\n请给出详细解答，支持使用 LaTeX 公式排版。"
+                    if focus_content:
+                        context_prompt += f"他卡在了这道错题上：\n\"\"\"{focus_content}\"\"\"\n"
+                    context_prompt += f"现在学生向你请教：{user_msg}\n请给出详细解答，支持使用 LaTeX 公式排版。"
                     
                     response = client.models.generate_content(model='gemini-2.5-flash', contents=context_prompt)
-                    st.write(response.text)
                     st.session_state.chat_history.append({"role": "assistant", "content": response.text})
+                    st.rerun()
                 except Exception as e:
                     st.error(f"对话引擎调用失败: {e}")
